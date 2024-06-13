@@ -10,141 +10,101 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-##
-# @def fetch_and_extract
-# @brief Fetches webpage content for a given URL, extracts article details, and returns a list of dictionaries.
-# @param url URL of the webpage to fetch
-# @param source Name of the source
-# @param selector Selector to extract article links
-# @return List of dictionaries containing article details
-##
-
-
-def fetch_and_extract(url, source, selector):
+def fetch_and_transform(url, source, selector):
     """
-    Fetches webpage content for a given URL, extracts article details, and returns a list of dictionaries.
+    Fetches webpage content from the specified URL, extracts article details,
+    and returns a list of dictionaries containing the article details.
     """
     try:
         response = requests.get(url, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
-
         links = [a['href'] for a in soup.select(selector) if 'href' in a.attrs]
         links = [link if link.startswith('http') else url + link for link in links]
 
-        data = []
-
+        articles = []
         for link in links:
-            response = requests.get(link, timeout=10)
-            article_soup = BeautifulSoup(response.text, 'html.parser')
-            title_element = article_soup.find('title')
-            title = title_element.text.strip() if title_element else None
+            article_response = requests.get(link, timeout=10)
+            article_soup = BeautifulSoup(article_response.text, 'html.parser')
+            title = article_soup.find('title').text.strip() if article_soup.find('title') else None
             paragraphs = article_soup.find_all('p')
-            description = ' '.join([p.text.strip() for p in paragraphs if p.text.strip()]) if paragraphs else None
+            description = ' '.join(p.text.strip() for p in paragraphs if p.text.strip())
 
             if title and description:
-                title = re.sub(r'\s+', ' ', re.sub(r'[^\w\s]', '', title)).strip()
-                description = re.sub(r'\s+', ' ', re.sub(r'[^\w\s]', '', description)).strip()
-                data.append({
-                    'title': title,
-                    'description': description,
+                articles.append({
+                    'title': re.sub(r'\s+', ' ', re.sub(r'[^\w\s]', '', title)),
+                    'description': re.sub(r'\s+', ' ', re.sub(r'[^\w\s]', '', description)),
                     'source': source,
                     'url': link
                 })
-
-        return data
+        return articles
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to fetch {url}: {str(e)}")
         return []
 
-##
-# @def load
-# @brief Loads the transformed data into a CSV file.
-# @param data List of dictionaries containing article details
-##
-
-def load(data):
+def load_articles(data):
     """
-    Loads the transformed data into a CSV file.
+    Loads the extracted data into a CSV file.
     """
     try:
-        # Try to load existing CSV file
-        df = pd.read_csv('/mnt/d/MLOps/MLOPS_A2/Data.csv')
+        df = pd.read_csv('./MLOPS_A2/Data.csv')
     except FileNotFoundError:
-        # If file doesn't exist, create an empty DataFrame
         df = pd.DataFrame()
 
-    # Append new data to existing DataFrame or create new DataFrame if empty
     new_df = pd.DataFrame(data)
     df = pd.concat([df, new_df], ignore_index=True)
+    df.to_csv('./MLOPS_A2/Data.csv', index=False)
 
-    # Write DataFrame to CSV file
-    df.to_csv('/mnt/d/MLOps/MLOPS_A2/Data.csv', index=False)
-
-dag = DAG('MLOPS_Data_Scrapped', start_date=datetime(2024, 5, 7), schedule="@daily")
-
-##
-# @def fetch_and_extract
-# @brief Fetches webpage content for a given URL, extracts article details, and returns a list of dictionaries.
-# @param url URL of the webpage to fetch
-# @param source Name of the source
-# @param selector Selector to extract article links
-# @return List of dictionaries containing article details
-##
-
+dag = DAG(
+    'MLOPS_Data_Scraping',
+    start_date=datetime(2024, 5, 7),
+    schedule_interval="@daily"
+)
 
 with dag:
-    # Initialize Git and DVC in the directory
     init_git = BashOperator(
-        task_id='InitiateGit',
-        bash_command="cd /mnt/d/MLOps/MLOPS_A2 && git init "
+        task_id='init_git',
+        bash_command="cd ./MLOPS_A2 && git init"
     )
     init_dvc = BashOperator(
-        task_id='InitiateDVC',
-        bash_command="cd /mnt/d/MLOps/MLOPS_A2 && dvc init"
+        task_id='init_dvc',
+        bash_command="cd ./MLOPS_A2 && dvc init"
     )
 
-    # Add remote repositories for Git and DVC
-    init_add_git_repo = BashOperator(
-        task_id='init_repogit',
-        bash_command="cd /mnt/d/MLOps/MLOPS_A2 && git remote add origin git@github.com:Ammar123890/Mlops_-Assignment2.git "
-    )
-    # Add remote repositories for Git and DVC
-    init_add_dvc_drive = BashOperator(
-        task_id='init_repodvc',
-        bash_command="cd /mnt/d/MLOps/MLOPS_A2 && dvc remote add -d myremote gdrive://1OtPEaU__vXt2Swm6puLNsOuxgjq6mqU3"
+    add_git_repo = BashOperator(
+        task_id='add_git_repo',
+        bash_command="cd ./MLOPS_A2 && git remote add origin git@github.com:Ammar123890/MLOps_Assignment2.git"
     )
 
-    # Ensure the remote repo setup depends on the initial git and DVC setup
-    init_git >> init_dvc >> init_add_git_repo >>  init_add_dvc_drive
+    add_dvc_remote = BashOperator(
+        task_id='add_dvc_remote',
+        bash_command="cd ./MLOPS_A2 && dvc remote add -d myremote gdrive://1OtPEaU__vXt2Swm6puLNsOuxgjq6mqU3"
+    )
 
-    # Define sources and tasks for each source
-    sources = {'BBC': {'url': 'https://www.bbc.com', 'selector': 'a[data-testid="internal-link"]'},
-               'Dawn': {'url': 'https://www.dawn.com', 'selector': 'article.story a.story__link'}}
-    last_task = init_add_dvc_drive
-    for source, info in sources.items():
-        extract_and_transform_task = PythonOperator(
-            task_id=f'extract_and_transform_{source.lower()}',
-            python_callable=fetch_and_extract,
-            op_kwargs={'url': info['url'], 'source': source, 'selector': info['selector']}
+    init_git >> init_dvc >> add_git_repo >> add_dvc_remote
+
+    for source, details in {'BBC': {'url': 'https://www.bbc.com', 'selector': 'a[data-testid="internal-link"]'}, 'Dawn': {'url': 'https://www.dawn.com', 'selector': 'article.story a.story__link'}}.items():
+        fetch_transform_task = PythonOperator(
+            task_id=f'fetch_transform_{source.lower()}',
+            python_callable=fetch_and_transform,
+            op_kwargs={'url': details['url'], 'source': source, 'selector': details['selector']}
         )
 
         load_task = PythonOperator(
             task_id=f'load_{source.lower()}',
-            python_callable=load,
-            op_args=[extract_and_transform_task.output],
+            python_callable=load_articles,
+            op_args=[fetch_transform_task.output],
         )
 
-        last_task >> extract_and_transform_task >> load_task
-        last_task = load_task
-    # DVC and Git final tasks
-    dvc_task = BashOperator(
-        task_id='dvc_Push_Add',
-        bash_command="cd /mnt/d/MLOps/MLOPS_A2 && dvc add Data.csv && dvc push"
+        add_dvc_remote >> fetch_transform_task >> load_task
+
+    dvc_add_push = BashOperator(
+        task_id='dvc_add_push',
+        bash_command="cd ./MLOPS_A2 && dvc add Data.csv && dvc push"
     )
 
-    git_push = BashOperator(
-        task_id='git_PUsh_Add',
-        bash_command="cd /mnt/d/MLOps/MLOPS_A2 && git add Data.csv.dvc && git commit -m 'Updated articles' && git push origin master"
+    git_commit_push = BashOperator(
+        task_id='git_commit_push',
+        bash_command="cd ./MLOPS_A2 && git add Data.csv.dvc && git commit -m 'Updated articles' && git push origin master"
     )
-    # Ensure these final tasks follow the last load task
-    last_task >> dvc_task >> git_push
+
+    load_task >> dvc_add_push >> git_commit_push
