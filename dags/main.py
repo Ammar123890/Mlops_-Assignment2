@@ -1,109 +1,150 @@
-import requests
-from bs4 import BeautifulSoup
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from datetime import datetime, timedelta
-import re
+from airflow.operators.bash import BashOperator
+from datetime import datetime
+import requests
+from bs4 import BeautifulSoup
 import pandas as pd
-import os
+import re
+import logging
 
-# Updated sources list
-sources = ['https://www.geo.tv', 'https://arynews.tv']
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def extract():
-    all_data = []
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'}
-    for source in sources:
-        reqs = requests.get(source, headers=headers)
-        soup = BeautifulSoup(reqs.text, 'html.parser')
-        articles = soup.find_all('article')
-        for article in articles:
-            # for Geo.tv and ARY News
-            title = article.find('h2')
-            description = article.find('p')
-            url = article.find('a', href=True)
-            if title and description and url:
-                all_data.append({
-                    'url': url['href'],
-                    'title': title.get_text(strip=True),
-                    'description': description.get_text(strip=True)
+##
+# @def fetch_and_extract
+# @brief Fetches webpage content for a given URL, extracts article details, and returns a list of dictionaries.
+# @param url URL of the webpage to fetch
+# @param source Name of the source
+# @param selector Selector to extract article links
+# @return List of dictionaries containing article details
+##
+
+
+def fetch_and_extract(url, source, selector):
+    """
+    Fetches webpage content for a given URL, extracts article details, and returns a list of dictionaries.
+    """
+    try:
+        response = requests.get(url, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        links = [a['href'] for a in soup.select(selector) if 'href' in a.attrs]
+        links = [link if link.startswith('http') else url + link for link in links]
+
+        data = []
+
+        for link in links:
+            response = requests.get(link, timeout=10)
+            article_soup = BeautifulSoup(response.text, 'html.parser')
+            title_element = article_soup.find('title')
+            title = title_element.text.strip() if title_element else None
+            paragraphs = article_soup.find_all('p')
+            description = ' '.join([p.text.strip() for p in paragraphs if p.text.strip()]) if paragraphs else None
+
+            if title and description:
+                title = re.sub(r'\s+', ' ', re.sub(r'[^\w\s]', '', title)).strip()
+                description = re.sub(r'\s+', ' ', re.sub(r'[^\w\s]', '', description)).strip()
+                data.append({
+                    'title': title,
+                    'description': description,
+                    'source': source,
+                    'url': link
                 })
-    return all_data
 
-def clean_text(text):
-    """ Utility function to clean text by removing special characters and excessive whitespace. """
-    text = re.sub(r'\s+', ' ', text)  # Replace multiple whitespaces with single space
-    text = re.sub(r'[^\w\s]', '', text)  # Remove punctuation
-    return text.strip().lower()
+        return data
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to fetch {url}: {str(e)}")
+        return []
 
-def transform(extracted_data):
-    transformed_data = []
-    for data in extracted_data:
-        transformed_data.append({
-            'url': data['url'],
-            'title': clean_text(data['title']),
-            'description': clean_text(data['description'])
-        })
-    return transformed_data
+##
+# @def load
+# @brief Loads the transformed data into a CSV file.
+# @param data List of dictionaries containing article details
+##
 
-def load(transformed_data):
-    # Convert data to DataFrame
-    df = pd.DataFrame(transformed_data)
-    filename = '../extracted_data.csv'
-    df.to_csv(filename, index=False)
+def load(data):
+    """
+    Loads the transformed data into a CSV file.
+    """
+    try:
+        # Try to load existing CSV file
+        df = pd.read_csv('/mnt/d/MLOps/MLOPS_A2/Data.csv')
+    except FileNotFoundError:
+        # If file doesn't exist, create an empty DataFrame
+        df = pd.DataFrame()
 
-def version_control():
-    filename = '../extracted_data.csv'  # The filename created in the load function
-    # Track the file with DVC
-    os.system('dvc add ' + filename)
-    # Commit changes to Git (ensure you have a git repository initialized)
-    os.system('git add ' + filename + '.dvc')
-    os.system('git commit -m "Update data version"')
-    # Push changes to the DVC remote storage
-    os.system('dvc push')
-    # Optionally, push git changes
-    os.system('git push')
+    # Append new data to existing DataFrame or create new DataFrame if empty
+    new_df = pd.DataFrame(data)
+    df = pd.concat([df, new_df], ignore_index=True)
 
-default_args = {
-    'owner': 'airflow-demo',
-    'retry_delay': timedelta(minutes=5),
-    'email_on_failure': False,
-    'email_on_retry': False
-}
+    # Write DataFrame to CSV file
+    df.to_csv('/mnt/d/MLOps/MLOPS_A2/Data.csv', index=False)
 
-dag = DAG(
-    'mlops-dag-assignment',
-    default_args=default_args,
-    description='A simple Dag',
-    schedule_interval=timedelta(days=1),
-    start_date=datetime(2024, 6, 12)
-)
+dag = DAG('MLOPS_Data_Scrapped', start_date=datetime(2024, 5, 7), schedule="@daily")
 
-task1 = PythonOperator(
-    task_id="extract_task",
-    python_callable=extract,
-    dag=dag,
-    execution_timeout=timedelta(minutes=5)
-)
+##
+# @def fetch_and_extract
+# @brief Fetches webpage content for a given URL, extracts article details, and returns a list of dictionaries.
+# @param url URL of the webpage to fetch
+# @param source Name of the source
+# @param selector Selector to extract article links
+# @return List of dictionaries containing article details
+##
 
-task2 = PythonOperator(
-    task_id="transform_task",
-    python_callable=transform,
-    op_kwargs={'extracted_data': "{{ ti.xcom_pull(task_ids='extract_task') }}"},
-    dag=dag,
-)
 
-task3 = PythonOperator(
-    task_id="load_task",
-    python_callable=load,
-    op_kwargs={'transformed_data': "{{ ti.xcom_pull(task_ids='transform_task') }}"},
-    dag=dag,
-)
+with dag:
+    # Initialize Git and DVC in the directory
+    init_git = BashOperator(
+        task_id='InitiateGit',
+        bash_command="cd /mnt/d/MLOps/MLOPS_A2 && git init "
+    )
+    init_dvc = BashOperator(
+        task_id='InitiateDVC',
+        bash_command="cd /mnt/d/MLOps/MLOPS_A2 && dvc init"
+    )
 
-task4 = PythonOperator(
-    task_id="version_control_task",
-    python_callable=version_control,
-    dag=dag,
-)
+    # Add remote repositories for Git and DVC
+    init_add_git_repo = BashOperator(
+        task_id='init_repogit',
+        bash_command="cd /mnt/d/MLOps/MLOPS_A2 && git remote add origin git@github.com:Ammar123890/Mlops_-Assignment2.git "
+    )
+    # Add remote repositories for Git and DVC
+    init_add_dvc_drive = BashOperator(
+        task_id='init_repodvc',
+        bash_command="cd /mnt/d/MLOps/MLOPS_A2 && dvc remote add -d myremote gdrive://1OtPEaU__vXt2Swm6puLNsOuxgjq6mqU3"
+    )
 
-task1 >> task2 >> task3 >> task4
+    # Ensure the remote repo setup depends on the initial git and DVC setup
+    init_git >> init_dvc >> init_add_git_repo >>  init_add_dvc_drive
+
+    # Define sources and tasks for each source
+    sources = {'BBC': {'url': 'https://www.bbc.com', 'selector': 'a[data-testid="internal-link"]'},
+               'Dawn': {'url': 'https://www.dawn.com', 'selector': 'article.story a.story__link'}}
+    last_task = init_add_dvc_drive
+    for source, info in sources.items():
+        extract_and_transform_task = PythonOperator(
+            task_id=f'extract_and_transform_{source.lower()}',
+            python_callable=fetch_and_extract,
+            op_kwargs={'url': info['url'], 'source': source, 'selector': info['selector']}
+        )
+
+        load_task = PythonOperator(
+            task_id=f'load_{source.lower()}',
+            python_callable=load,
+            op_args=[extract_and_transform_task.output],
+        )
+
+        last_task >> extract_and_transform_task >> load_task
+        last_task = load_task
+    # DVC and Git final tasks
+    dvc_task = BashOperator(
+        task_id='dvc_Push_Add',
+        bash_command="cd /mnt/d/MLOps/MLOPS_A2 && dvc add Data.csv && dvc push"
+    )
+
+    git_push = BashOperator(
+        task_id='git_PUsh_Add',
+        bash_command="cd /mnt/d/MLOps/MLOPS_A2 && git add Data.csv.dvc && git commit -m 'Updated articles' && git push origin master"
+    )
+    # Ensure these final tasks follow the last load task
+    last_task >> dvc_task >> git_push
